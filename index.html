@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>코인 24시간 경로 예측</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* 레이아웃: 위 코인 칩 → 실시간 가격 줄 → 큰 차트(과거 봉 | 지금 | 24시간 경로 다발) → 도달 확률 사다리 두 열 → 모형 상태 */
+:root{
+  --bg:#0c0e12; --panel:#13161c; --line:#232831; --ink:#e9ebee; --ink-2:#a9afb9; --ink-3:#6c737f;
+  --up:#2bb39a; --dn:#e5605b; --path:#ffffff; --med:#5aa2ff; --chip:#1b1f27;
+  --f-ui:"IBM Plex Sans KR",-apple-system,"Apple SD Gothic Neo","Segoe UI",sans-serif; --f-num:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--f-ui)}
+body{padding:calc(env(safe-area-inset-top,0px) + 10px) max(16px,env(safe-area-inset-right,0px)) calc(env(safe-area-inset-bottom,0px) + 24px) max(16px,env(safe-area-inset-left,0px))}
+.wrap{max-width:1100px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+.chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
+.chips::-webkit-scrollbar{display:none}
+.chip{flex:0 0 auto;font:500 13px var(--f-num);color:var(--ink-2);background:var(--chip);border:1px solid var(--line);border-radius:999px;padding:6px 12px;cursor:pointer}
+.chip[aria-pressed="true"]{color:var(--bg);background:var(--ink);border-color:var(--ink)}
+.chip:focus-visible{outline:2px solid var(--med);outline-offset:2px}
+.top{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 18px}
+.sym{font:600 15px var(--f-ui);letter-spacing:.02em}
+.px{font:500 30px var(--f-num);font-variant-numeric:tabular-nums}
+.chg{font:500 14px var(--f-num)}
+.meta{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--ink-2)}
+.meta b{font:500 12.5px var(--f-num);color:var(--ink)}
+.live{display:inline-flex;align-items:center;gap:6px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ink-3)}
+.dot.on{background:var(--up);box-shadow:0 0 0 3px rgba(43,179,154,.18)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px}
+.chart{position:relative;padding:8px 6px 4px}
+canvas{display:block;width:100%;height:clamp(340px,58vh,560px)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;padding:6px 10px 8px;font-size:11.5px;color:var(--ink-3)}
+.legend i{display:inline-block;vertical-align:middle;margin-right:6px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.ladder{padding:12px 14px}
+.ladder h2{font:600 13px var(--f-ui);margin:0 0 8px;color:var(--ink-2);letter-spacing:.02em}
+.row{display:grid;grid-template-columns:42px 1fr 64px;align-items:center;gap:10px;padding:5px 0;border-top:1px solid var(--line);font:400 13px var(--f-num);font-variant-numeric:tabular-nums}
+.row:first-of-type{border-top:0}
+.row .k{color:var(--ink-3);font-size:11.5px}
+.row .p{text-align:right;font-weight:500}
+.bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+.bar span{display:block;height:100%}
+.note{padding:12px 14px;font-size:12.5px;line-height:1.65;color:var(--ink-2)}
+.note p{margin:0 0 6px;max-width:72ch}
+.note p:last-child{margin:0}
+.verdict{display:inline-block;font:600 12px var(--f-ui);padding:2px 8px;border-radius:6px;background:#2a2f39;color:var(--ink)}
+.err{color:var(--dn)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="chips" id="chips" aria-label="코인 선택"></nav>
+  <div class="top">
+    <span class="sym" id="sym">BTCUSDT</span>
+    <span class="px" id="px">—</span>
+    <span class="chg" id="chg"></span>
+    <span class="live meta"><span class="dot" id="dot"></span><span id="liveTxt">연결 중</span></span>
+  </div>
+  <div class="meta" id="meta">
+    <span>24시간 변동성 <b id="sig">—</b></span>
+    <span>예측 기준 <b id="tAt">—</b></span>
+    <span>판단 <span class="verdict">관망</span></span>
+  </div>
+  <section class="card chart">
+    <canvas id="cv" role="img" aria-label="최근 36시간 1시간봉과 앞으로 24시간의 예상 경로 다발. 진할수록 확률이 높은 경로"></canvas>
+    <div class="legend">
+      <span><i style="width:18px;height:0;border-top:2px dashed var(--med)"></i>중앙값(예측 아님)</span>
+      <span><i style="width:44px;height:6px;background:linear-gradient(90deg,rgba(255,255,255,.04),rgba(255,255,255,.75))"></i>경로 확률 낮음 → 높음</span>
+      <span><i style="width:8px;height:8px;border-radius:50%;background:var(--up)"></i>실시간 가격</span>
+      <span>오른쪽 % = 예측 기준가에서 24시간 안에 그 가격에 닿을 확률</span>
+    </div>
+  </section>
+  <div class="grid2">
+    <section class="card ladder"><h2>위로 닿을 확률 (24시간)</h2><div id="ladUp"></div></section>
+    <section class="card ladder"><h2>아래로 닿을 확률 (24시간)</h2><div id="ladDn"></div></section>
+  </div>
+  <section class="card note" id="note">
+    <p>확률은 5분봉이 마감될 때마다 그 시점까지의 바이비트 무기한 시세만으로 다시 계산합니다. 가격은 체결마다 실시간으로 움직입니다.</p>
+    <p>경로는 이 코인의 실제 과거 24시간 경로를 지금 변동성과 예측 확률에 맞게 크기만 조정한 것입니다. 앞으로의 경로를 예언하지 않습니다. 진하기는 경로가 많이 지나가는 곳, 즉 확률이 높은 곳을 뜻합니다.</p>
+    <p>판단은 항상 관망입니다. 비용(왕복 0.14%)을 빼고 믿을 만하게 양의 기대값인 익절·손절 조합을 찾지 못했기 때문입니다. 투자 조언이 아닙니다.</p>
+    <p id="modelInfo"></p>
+  </section>
+</div>
+<script>
+"use strict";
+const API = "https://api.bybit.com/v5/market/kline", WS = "wss://stream.bybit.com/v5/public/linear";
+const $ = id => document.getElementById(id);
+const S = {model: null, sym: "BTCUSDT", bars: [], live: null, fc: null, ws: null, draw: 0};
+const sigm = x => 1 / (1 + Math.exp(-x)), logit = p => Math.log(Math.min(Math.max(p, 1e-4), 1 - 1e-4) / (1 - Math.min(Math.max(p, 1e-4), 1 - 1e-4)));
+const dec = p => p >= 1000 ? 0 : p >= 10 ? 2 : p >= 0.1 ? 4 : 6;
+const fmt = (v, d) => v.toLocaleString("en-US", {minimumFractionDigits: d, maximumFractionDigits: d});
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function getBars(sym, need = 10200) {
+  let end = Date.now(), out = [];
+  for (let i = 0; i < 16 && out.length < need; i++) {
+    let list = null;
+    for (let a = 0; a < 4 && !list; a++) {
+      try { const r = await fetch(`${API}?category=linear&symbol=${sym}&interval=5&end=${end}&limit=1000`); const j = await r.json();
+        if (j.retCode === 0) list = j.result.list; } catch (e) {}
+      if (!list) await sleep(400 * (a + 1));
+    }
+    if (!list || !list.length) break;
+    out = out.concat(list); end = Math.min(...list.map(x => +x[0])) - 1; await sleep(120);
+  }
+  const m = new Map(); out.forEach(x => m.set(+x[0], [+x[0], +x[1], +x[2], +x[3], +x[4]]));
+  return [...m.values()].sort((a, b) => a[0] - b[0]);
+}
+
+function features(bars, tEnd) {
+  const B = bars.filter(b => b[0] + 3e5 <= tEnd); const n = B.length;
+  if (n < 2100) return null;
+  const c = B.map(b => b[4]), r2 = [0];
+  for (let i = 1; i < n; i++) { const r = Math.log(c[i] / c[i - 1]); r2.push(r * r); }
+  const sumLast = w => { let s = 0, k = 0; for (let i = Math.max(1, n - w); i < n; i++) { s += r2[i]; k++; } return k >= w / 2 ? s : NaN; };
+  const rv1d = sumLast(288), rv7d = sumLast(2016) / 7, rv30d = sumLast(8640) / 30, rv4h = sumLast(48) * 6;
+  const sig = Math.sqrt(rv1d), T = new Date(B[n - 1][0] + 3e5), h = T.getUTCHours(), dw = T.getUTCDay();
+  const ret1d = Math.log(c[n - 1] / c[n - 1 - 288]), ret7d = Math.log(c[n - 1] / c[n - 1 - 2016]);
+  return {T, close: c[n - 1], sig, x: [Math.log(sig), Math.log(rv4h / rv1d), Math.log(rv1d / rv30d), ret1d / sig, ret7d / (sig * Math.sqrt(7)),
+    Math.sin(2 * Math.PI * h / 24), Math.cos(2 * Math.PI * h / 24), (dw === 0 || dw === 6) ? 1 : 0]};
+}
+
+function probs(asset, f) {
+  const out = {};
+  for (const [key, m] of Object.entries(asset.touch)) {
+    const x = f.x.concat([logit(m.base)]); let z = m.b0;
+    for (let j = 0; j < x.length; j++) z += m.w[j] * (x[j] - m.mu[j]) / (m.sd[j] || 1);
+    const p = sigm(z); out[key] = {raw: p, p: sigm(m.platt[0] + m.platt[1] * logit(p))};
+  }
+  return out;
+}
+
+function fitPaths(asset, P, levels) {
+  const Z = asset.paths, mx = Z.map(p => Math.max(0, ...p)), mn = Z.map(p => Math.max(0, ...p.map(v => -v)));
+  const fit = (arr, side) => { let best = [1e9, 1];
+    for (let k = 0.7; k <= 2.0001; k += 0.02) { let e = 0; levels.forEach(L => { const q = arr.filter(v => k * v >= L).length / arr.length; e += (q - P[side + L.toFixed(1)].p) ** 2; }); if (e < best[0]) best = [e, k]; }
+    return best[1]; };
+  const ku = fit(mx, "up"), kd = fit(mn, "dn");
+  const Zs = Z.map(p => p.map(v => v > 0 ? v * ku : v * kd)); const N = Zs.length, M = Zs[0].length, dens = new Float64Array(N);
+  for (let t = 1; t < M; t++) { const col = Zs.map(p => p[t]); const mean = col.reduce((a, b) => a + b, 0) / N; const sd = Math.sqrt(col.reduce((a, b) => a + (b - mean) ** 2, 0) / N) * 0.3 + 1e-9;
+    const d = col.map(a => col.reduce((s, b) => s + Math.exp(-0.5 * ((a - b) / sd) ** 2), 0)); const dm = Math.max(...d); d.forEach((v, i) => dens[i] += v / dm); }
+  const order = [...dens.keys()].sort((a, b) => dens[a] - dens[b]), rank = new Float64Array(N); order.forEach((i, r) => rank[i] = r / (N - 1));
+  const med = []; for (let t = 0; t < M; t++) { const col = Zs.map(p => p[t]).sort((a, b) => a - b); med.push(col[Math.floor(N / 2)]); }
+  return {Zs, rank, order, med};
+}
+
+function compute() {
+  const a = S.model.assets[S.sym]; const f = features(S.bars, Date.now());
+  if (!f || f.x.some(v => !isFinite(v))) { $("liveTxt").innerHTML = '<span class="err">과거 시세가 부족해 확률을 계산하지 못했습니다. 새로고침해 주세요.</span>'; return; }
+  const P = probs(a, f), levels = S.model.levels;
+  S.fc = {f, P, levels, paths: fitPaths(a, P, levels)};
+  $("sig").textContent = (f.sig * 100).toFixed(2) + "%";
+  $("tAt").textContent = f.T.toISOString().slice(5, 16).replace("T", " ") + " UTC";
+  const d = dec(f.close), row = (side, L) => { const p = P[side + L.toFixed(1)].p, v = f.close * Math.exp((side === "up" ? 1 : -1) * L * f.sig);
+    return `<div class="row"><span class="k">${side === "up" ? "+" : "−"}${L}σ</span><span>${fmt(v, d)}<div class="bar"><span style="width:${(p * 100).toFixed(1)}%;background:${side === "up" ? "var(--up)" : "var(--dn)"}"></span></div></span><span class="p">${(p * 100).toFixed(0)}%</span></div>`; };
+  $("ladUp").innerHTML = levels.map(L => row("up", L)).join(""); $("ladDn").innerHTML = levels.map(L => row("dn", L)).join("");
+  draw();
+}
+
+function hourly(bars, livePx) {
+  const H = new Map();
+  for (const b of bars) { const k = Math.floor(b[0] / 36e5) * 36e5; const h = H.get(k); if (!h) H.set(k, [k, b[1], b[2], b[3], b[4]]); else { h[2] = Math.max(h[2], b[2]); h[3] = Math.min(h[3], b[3]); h[4] = b[4]; } }
+  const arr = [...H.values()].sort((a, b) => a[0] - b[0]).slice(-36);
+  if (livePx && arr.length) { const l = arr[arr.length - 1]; l[2] = Math.max(l[2], livePx); l[3] = Math.min(l[3], livePx); l[4] = livePx; }
+  return arr;
+}
+
+function draw() {
+  if (!S.fc) return; const cv = $("cv"), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const {f, P, levels, paths} = S.fc, px0 = f.close, cs = hourly(S.bars, S.live), d = dec(px0);
+  const rightPad = W < 520 ? 92 : 112, axisW = W < 520 ? 0 : 56, top = 14, bot = H - 26, x0 = axisW + 4, xNow = x0 + (W - rightPad - x0) * 0.56, x1 = W - rightPad;
+  let lo = Math.min(...cs.map(c => c[3]), px0 * Math.exp(-2.05 * f.sig), S.live || px0), hi = Math.max(...cs.map(c => c[2]), px0 * Math.exp(2.05 * f.sig), S.live || px0); const pad = (hi - lo) * 0.05; lo -= pad; hi += pad;
+  const Y = v => bot - (v - lo) / (hi - lo) * (bot - top), cw = (xNow - x0) / cs.length;
+  g.font = "11px 'IBM Plex Mono', monospace"; g.textBaseline = "middle";
+  for (let j = 0; j <= 5; j++) { const v = lo + (hi - lo) * j / 5, y = Y(v); g.strokeStyle = "#1c2028"; g.lineWidth = 1; g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke(); if (axisW) { g.fillStyle = "#6c737f"; g.textAlign = "right"; g.fillText(fmt(v, d), axisW, y); } }
+  cs.forEach((c, i) => { const x = x0 + cw * (i + .5), col = c[4] >= c[1] ? "#2bb39a" : "#e5605b"; g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x, Y(c[2])); g.lineTo(x, Y(c[3])); g.stroke(); const yt = Y(Math.max(c[1], c[4])), yb = Y(Math.min(c[1], c[4])); g.fillRect(x - cw * .32, yt, cw * .64, Math.max(1, yb - yt)); });
+  const M = paths.Zs[0].length, FX = t => xNow + (x1 - xNow) * t / (M - 1);
+  for (const i of paths.order) { const r = paths.rank[i]; g.strokeStyle = `rgba(255,255,255,${(0.015 + 0.3 * r ** 3).toFixed(3)})`; g.lineWidth = 0.4 + 1.0 * r * r;
+    g.beginPath(); paths.Zs[i].forEach((z, t) => { const y = Y(px0 * Math.exp(z * f.sig)); t ? g.lineTo(FX(t), y) : g.moveTo(FX(t), y); }); g.stroke(); }
+  g.setLineDash([6, 4]); g.strokeStyle = "#5aa2ff"; g.lineWidth = 1.6; g.beginPath(); paths.med.forEach((z, t) => { const y = Y(px0 * Math.exp(z * f.sig)); t ? g.lineTo(FX(t), y) : g.moveTo(FX(t), y); }); g.stroke(); g.setLineDash([]);
+  g.setLineDash([3, 3]); g.strokeStyle = "#6c737f"; g.lineWidth = 1; g.beginPath(); g.moveTo(xNow, top - 4); g.lineTo(xNow, bot); g.stroke(); g.setLineDash([]);
+  g.fillStyle = "#e9ebee"; g.textAlign = "left"; g.font = "500 11px 'IBM Plex Sans KR', sans-serif"; g.fillText("지금", xNow + 4, top + 2);
+  g.font = "11px 'IBM Plex Mono', monospace";
+  for (const side of ["up", "dn"]) for (const L of levels) { const v = px0 * Math.exp((side === "up" ? 1 : -1) * L * f.sig), y = Y(v); if (y < top || y > bot) continue; const p = P[side + L.toFixed(1)].p;
+    g.strokeStyle = `rgba(90,162,255,${(0.12 + 0.5 * p).toFixed(2)})`; g.setLineDash([1, 3]); g.beginPath(); g.moveTo(xNow, y); g.lineTo(x1, y); g.stroke(); g.setLineDash([]);
+    g.fillStyle = `rgba(90,162,255,${(0.12 + 0.7 * p).toFixed(2)})`; const tw = rightPad - 8; g.fillRect(x1 + 4, y - 9, tw, 18); g.fillStyle = "#e9ebee"; g.textAlign = "left";
+    g.fillText(`${fmt(v, d)} ${(p * 100).toFixed(0)}%`.slice(0, 18), x1 + 8, y); }
+  if (S.live) { const yl = Y(S.live); g.fillStyle = S.live >= px0 ? "#2bb39a" : "#e5605b"; g.beginPath(); g.arc(xNow, yl, 4, 0, 2 * Math.PI); g.fill();
+    g.strokeStyle = "#0c0e12"; g.lineWidth = 2; g.stroke(); }
+  g.fillStyle = "#6c737f"; g.textAlign = "center"; g.font = "11px 'IBM Plex Mono', monospace";
+  (W < 520 ? [12, 24] : [6, 12, 18, 24]).forEach(hh => g.fillText(`+${hh}h`, FX((M - 1) * hh / 24), H - 10));
+  if (cs.length) { g.textAlign = "left"; g.fillText(new Date(cs[0][0]).toISOString().slice(5, 13).replace("T", " ") + "시", x0, H - 10); }
+}
+
+function setLive(p) {
+  S.live = p; const f = S.fc && S.fc.f, d = dec(p); $("px").textContent = fmt(p, d);
+  if (f) { const ch = Math.log(p / f.close) / f.sig; const el = $("chg"); el.textContent = `${ch >= 0 ? "+" : ""}${(Math.exp(ch * f.sig) * 100 - 100).toFixed(2)}% (${ch >= 0 ? "+" : ""}${ch.toFixed(2)}σ) 예측 기준 대비`; el.style.color = ch >= 0 ? "var(--up)" : "var(--dn)"; }
+  if (!S.draw) S.draw = requestAnimationFrame(() => { S.draw = 0; draw(); });
+}
+
+function connect() {
+  if (S.ws) { try { S.ws.close(); } catch (e) {} }
+  const ws = new WebSocket(WS); S.ws = ws; const sym = S.sym;
+  ws.onopen = () => { ws.send(JSON.stringify({op: "subscribe", args: [`publicTrade.${sym}`, `kline.5.${sym}`]})); $("dot").className = "dot on"; $("liveTxt").textContent = "실시간"; S.ping = setInterval(() => { try { ws.send('{"op":"ping"}'); } catch (e) {} }, 20000); };
+  ws.onmessage = m => { const d = JSON.parse(m.data); if (!d.topic || sym !== S.sym) return;
+    if (d.topic.startsWith("publicTrade")) setLive(+d.data[d.data.length - 1].p);
+    else if (d.topic.startsWith("kline")) { for (const k of d.data) { const b = [+k.start, +k.open, +k.high, +k.low, +k.close]; const last = S.bars[S.bars.length - 1];
+      if (last && last[0] === b[0]) S.bars[S.bars.length - 1] = b; else if (!last || b[0] > last[0]) S.bars.push(b); if (k.confirm) compute(); } } };
+  ws.onclose = () => { clearInterval(S.ping); $("dot").className = "dot"; $("liveTxt").textContent = "재연결 중"; if (sym === S.sym) setTimeout(connect, 3000); };
+}
+
+async function select(sym) {
+  S.sym = sym; S.fc = null; S.live = null; $("sym").textContent = sym; $("px").textContent = "—"; $("chg").textContent = "";
+  document.querySelectorAll(".chip").forEach(c => c.setAttribute("aria-pressed", c.dataset.s === sym ? "true" : "false"));
+  try { localStorage.setItem("sym", sym); } catch (e) {}
+  try { S.bars = await getBars(sym); if (S.sym !== sym) return; compute(); setLive(S.bars[S.bars.length - 1][4]); connect(); }
+  catch (e) { $("liveTxt").innerHTML = '<span class="err">시세를 받지 못했습니다. 새로고침해 주세요.</span>'; }
+}
+
+window.__calc = (sym, tEndMs) => { const a = S.model.assets[sym]; const f = features(S.bars, tEndMs); const P = probs(a, f); return {T: f.T.toISOString(), close: f.close, sig: f.sig, P}; };
+
+(async () => {
+  S.model = await (await fetch("model.json", {cache: "no-cache"})).json();
+  const syms = Object.keys(S.model.assets);
+  $("chips").innerHTML = syms.map(s => `<button class="chip" data-s="${s}" aria-pressed="false">${s.replace("USDT", "")}</button>`).join("");
+  $("chips").onclick = e => { const b = e.target.closest(".chip"); if (b) select(b.dataset.s); };
+  const ls = S.model.live_score || {};
+  $("modelInfo").textContent = `모형 갱신 ${S.model.asof.slice(0, 10)} · 실시간 채점 ${ls["n_예측"] ?? 0}건(15개 코인): 도달 확률 예측 평균 ${((ls["도달_평균예측"] ?? 0) * 100).toFixed(1)}%, 실제 ${((ls["도달_실현"] ?? 0) * 100).toFixed(1)}%.`;
+  let start = "BTCUSDT"; try { const v = localStorage.getItem("sym"); if (v && S.model.assets[v]) start = v; } catch (e) {}
+  window.addEventListener("resize", () => draw());
+  select(start);
+})();
+</script>
+</body>
+</html>
