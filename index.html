@@ -73,7 +73,7 @@ canvas{display:block;width:100%;height:clamp(340px,58vh,560px)}
     <div class="legend">
       <span><i style="width:18px;height:0;border-top:2px dashed var(--med)"></i>중앙값(예측 아님)</span>
       <span><i style="width:44px;height:6px;background:linear-gradient(90deg,rgba(255,255,255,.04),rgba(255,255,255,.75))"></i>경로 확률 낮음 → 높음</span>
-      <span><i style="width:8px;height:8px;border-radius:50%;background:var(--up)"></i>실시간 가격</span>
+      <span>차트에 마우스나 손가락을 올리면 시간·가격 표시</span>
       <span>오른쪽 % = 예측 기준가에서 24시간 안에 그 가격에 닿을 확률</span>
     </div>
   </section>
@@ -195,12 +195,37 @@ function draw() {
     g.strokeStyle = `rgba(90,162,255,${(0.12 + 0.5 * p).toFixed(2)})`; g.setLineDash([1, 3]); g.beginPath(); g.moveTo(xNow, y); g.lineTo(x1, y); g.stroke(); g.setLineDash([]);
     g.fillStyle = `rgba(90,162,255,${(0.12 + 0.7 * p).toFixed(2)})`; const tw = rightPad - 8; g.fillRect(x1 + 4, y - 9, tw, 18); g.fillStyle = "#e9ebee"; g.textAlign = "left";
     g.fillText(`${fmt(v, d)} ${(p * 100).toFixed(0)}%`.slice(0, 18), x1 + 8, y); }
-  if (S.live) { const yl = Y(S.live); g.fillStyle = S.live >= px0 ? "#2bb39a" : "#e5605b"; g.beginPath(); g.arc(xNow, yl, 4, 0, 2 * Math.PI); g.fill();
-    g.strokeStyle = "#0c0e12"; g.lineWidth = 2; g.stroke(); }
   g.fillStyle = "#6c737f"; g.textAlign = "center"; g.font = "11px 'IBM Plex Mono', monospace";
   (W < 520 ? [12, 24] : [6, 12, 18, 24]).forEach(hh => g.fillText(`+${hh}h`, FX((M - 1) * hh / 24), H - 10));
-  if (cs.length) { g.textAlign = "left"; g.fillText(new Date(cs[0][0]).toISOString().slice(5, 13).replace("T", " ") + "시", x0, H - 10); }
+  if (cs.length) { g.textAlign = "left"; g.fillText(kst(cs[0][0]), x0, H - 10); }
+  if (S.hover) crosshair(g, {W, H, x0, xNow, x1, top, bot, lo, hi, cs, cw, M, FX, px0, f, paths, d});
 }
+
+const kst = ms => { const t = new Date(ms + 9 * 36e5); return `${String(t.getUTCMonth() + 1).padStart(2, "0")}-${String(t.getUTCDate()).padStart(2, "0")} ${String(t.getUTCHours()).padStart(2, "0")}:${String(t.getUTCMinutes()).padStart(2, "0")}`; };
+
+function crosshair(g, G) {
+  const {x, y} = S.hover; if (x < G.x0 || x > G.x1 || y < G.top || y > G.bot) return;
+  const price = G.lo + (G.bot - y) / (G.bot - G.top) * (G.hi - G.lo), lines = [];
+  if (x < G.xNow) {
+    const i = Math.min(G.cs.length - 1, Math.max(0, Math.floor((x - G.x0) / G.cw))), c = G.cs[i];
+    lines.push(`${kst(c[0])} KST`, `가격 ${fmt(price, G.d)}`, `시 ${fmt(c[1], G.d)}  고 ${fmt(c[2], G.d)}`, `저 ${fmt(c[3], G.d)}  종 ${fmt(c[4], G.d)}`);
+  } else {
+    const t = (x - G.xNow) / (G.x1 - G.xNow), hrs = t * 24, k = Math.round(t * (G.M - 1));
+    const zc = Math.log(price / G.px0) / G.f.sig, col = G.paths.Zs.map(p => p[k]), above = col.filter(z => z >= zc).length / col.length;
+    lines.push(`${kst(G.f.T.getTime() + hrs * 36e5)} KST (+${hrs.toFixed(1)}h)`, `가격 ${fmt(price, G.d)}`, `이 시각 경로 중 ${(above * 100).toFixed(0)}%가 이 가격 위`);
+  }
+  g.save(); g.strokeStyle = "rgba(233,235,238,.45)"; g.lineWidth = 1; g.setLineDash([4, 3]);
+  g.beginPath(); g.moveTo(x, G.top); g.lineTo(x, G.bot); g.moveTo(G.x0, y); g.lineTo(G.x1, y); g.stroke(); g.setLineDash([]);
+  g.font = "11.5px 'IBM Plex Mono', 'IBM Plex Sans KR', monospace"; g.textBaseline = "top"; g.textAlign = "left";
+  const tw = Math.max(...lines.map(s => g.measureText(s).width)) + 16, th = lines.length * 16 + 10;
+  let bx = x + 12, by = y + 12; if (bx + tw > G.W - 4) bx = x - tw - 12; if (by + th > G.bot) by = y - th - 12; if (bx < 4) bx = 4; if (by < 4) by = 4;
+  g.fillStyle = "rgba(19,22,28,.94)"; g.strokeStyle = "#2f3541"; g.fillRect(bx, by, tw, th); g.strokeRect(bx + .5, by + .5, tw - 1, th - 1);
+  lines.forEach((s, j) => { g.fillStyle = j === 0 ? "#a9afb9" : "#e9ebee"; g.fillText(s, bx + 8, by + 6 + j * 16); });
+  g.restore();
+}
+
+function hoverAt(e) { const r = $("cv").getBoundingClientRect(), p = e.touches ? e.touches[0] : e; S.hover = {x: p.clientX - r.left, y: p.clientY - r.top}; if (!S.draw) S.draw = requestAnimationFrame(() => { S.draw = 0; draw(); }); }
+function hoverOff() { S.hover = null; draw(); }
 
 function setLive(p) {
   S.live = p; const f = S.fc && S.fc.f, d = dec(p); $("px").textContent = fmt(p, d);
@@ -238,6 +263,9 @@ window.__calc = (sym, tEndMs) => { const a = S.model.assets[sym]; const f = feat
   $("modelInfo").textContent = `모형 갱신 ${S.model.asof.slice(0, 10)} · 실시간 채점 ${ls["n_예측"] ?? 0}건(15개 코인): 도달 확률 예측 평균 ${((ls["도달_평균예측"] ?? 0) * 100).toFixed(1)}%, 실제 ${((ls["도달_실현"] ?? 0) * 100).toFixed(1)}%.`;
   let start = "BTCUSDT"; try { const v = localStorage.getItem("sym"); if (v && S.model.assets[v]) start = v; } catch (e) {}
   window.addEventListener("resize", () => draw());
+  const cv = $("cv"); cv.addEventListener("mousemove", hoverAt); cv.addEventListener("mouseleave", hoverOff);
+  cv.addEventListener("touchstart", hoverAt, {passive: true}); cv.addEventListener("touchmove", hoverAt, {passive: true});
+  document.addEventListener("touchstart", e => { if (e.target !== cv && S.hover) hoverOff(); }, {passive: true});
   select(start);
 })();
 </script>
